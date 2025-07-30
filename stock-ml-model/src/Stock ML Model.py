@@ -14,6 +14,7 @@ from pathlib import Path
 from sklearn.model_selection import GridSearchCV
 import time
 import requests
+from sklearn.pipeline import Pipeline
 
 CACHE_FILE = "reddit_posts_cache.csv"
 
@@ -55,21 +56,32 @@ def fetchRedditPosts(subreddit, keyword, timeframe, sortvalue):
 
 
 def findCorrelation(stockData, features, cor_target):
+    print(stockData[features + ["Target"]].index)
+    print(stockData["Target"].index)
+    print(stockData[features + ["Target"]].head(10))
+    for col in features:
+        if stockData[col].equals(stockData["Target"]):
+            print(f"WARNING: Feature {col} is identical to Target!")
+    subset = stockData[features + ["Target"]].dropna()
     for i in features:
-        correlation = stockData[i].corr(stockData[cor_target])
+        correlation = subset[i].corr(stockData[cor_target])
         print(f"Correlation between {i} and stock price: {correlation:.2f}")
 
 def scoreDataset(X_train, X_val, y_train, y_val, nEstimators, max_depth, min_samples_leaf, min_samples_split, task, stockData, features):
     if task == "regression":
-        stockModel = RandomForestRegressor(random_state=1,
-                                    max_depth=max_depth,
-                                    n_estimators=nEstimators
-                                        ,min_samples_leaf=min_samples_leaf,
-                                        min_samples_split=min_samples_split,
-                                    max_features='sqrt'
-                                    )
-        stockModel.fit(X_train,y_train)
-        stockPredictions = stockModel.predict(X_val)
+        pipeline = Pipeline(steps=[
+        ('imputer', SimpleImputer()),
+        ('model', RandomForestRegressor(
+            random_state=1,
+            max_depth=max_depth,
+            n_estimators=nEstimators,
+            min_samples_leaf=min_samples_leaf,
+            min_samples_split=min_samples_split,
+            max_features='sqrt'
+        ))
+    ])
+        pipeline.fit(X_train,y_train)
+        stockPredictions = pipeline.predict(X_val)
         stockMae = mean_absolute_error(y_val, stockPredictions)
         maeAverage = 100 * (stockMae/y_val.mean())
         print("Validation MAE for Random Forest Model: {:,.2f}".format(maeAverage), "%")
@@ -77,20 +89,24 @@ def scoreDataset(X_train, X_val, y_train, y_val, nEstimators, max_depth, min_sam
         tomorrow_features = pd.DataFrame([latest_data[features]])
 
         # Predict tomorrow's closing price
-        tomorrow_pred = stockModel.predict(tomorrow_features)
+        tomorrow_pred = pipeline.predict(tomorrow_features)
         print(f"Predicted closing price for tomorrow: ${tomorrow_pred[0]:.2f}")
-        findFeatureImportance(stockModel, features)
+        findFeatureImportance(pipeline.named_steps["model"], features)
         findCorrelation(stockData, features, "Target")
     elif task == "classification":
-        stockModel = RandomForestClassifier(random_state=1,
-                                max_depth=max_depth,
-                                n_estimators=nEstimators
-                                    , min_samples_leaf=min_samples_leaf,
-                                    min_samples_split=min_samples_split,
-                                    max_features='sqrt'
-                                )
-        stockModel.fit(X_train,y_train)
-        stockPredictions = stockModel.predict(X_val)
+        pipeline = Pipeline(steps=[
+        ('imputer', SimpleImputer()),
+        ('model', RandomForestClassifier(
+            random_state=1,
+            max_depth=max_depth,
+            n_estimators=nEstimators,
+            min_samples_leaf=min_samples_leaf,
+            min_samples_split=min_samples_split,
+            max_features='sqrt'
+        ))
+    ])
+        pipeline.fit(X_train,y_train)
+        stockPredictions = pipeline.predict(X_val)
         from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
         print("Accuracy: {:.2f}".format(accuracy_score(y_val, stockPredictions)))
@@ -100,12 +116,12 @@ def scoreDataset(X_train, X_val, y_train, y_val, nEstimators, max_depth, min_sam
         # Predict wheter the stock price will increase tomorrow
         latest_data = stockData.iloc[-1]
         tomorrow_features = pd.DataFrame([latest_data[features]])
-        tomorrow_pred = stockModel.predict(tomorrow_features)
+        tomorrow_pred = pipeline.predict(tomorrow_features)
         if tomorrow_pred[0] == 1:
             print("Predicted stock price will increase tomorrow.")
         else:
             print("Predicted stock price will decrease tomorrow.")
-        findFeatureImportance(stockModel, features)
+        findFeatureImportance(pipeline.named_steps["model"], features)
         findCorrelation(stockData, features, "PriceIncrease")
 
 
@@ -159,10 +175,6 @@ def prepareRegressionData():
     stockData['RollingSentiment_3d'] = stockData['RedditSentiment'].rolling(window=3).mean()
 
     #Add Rolling Sentiment Features
-    stockData["RollingSentiment_3d"] = stockData["RedditSentiment"].rolling(window=3).mean()
-    stockData["RollingSentiment_7d"] = stockData["RedditSentiment"].rolling(window=7).mean()
-    stockData["RollingSentiment_14d"] = stockData["RedditSentiment"].rolling(window=14).mean()
-    stockData["RollingSentiment_30d"] = stockData["RedditSentiment"].rolling(window=30).mean()
     stockData["RollingSentiment_1yr"] = stockData["RedditSentiment"].rolling(window=365).mean()
 
     features = ["Open", "High", "PrevClose",  "MA5",  "RollingSentiment_1yr", "InterestRate"]
@@ -230,7 +242,7 @@ def prepareClassificationData():
     stockData["RollingSentiment_30d"] = stockData["RedditSentiment"].rolling(window=30).mean()
     stockData["RollingSentiment_1yr"] = stockData["RedditSentiment"].rolling(window=365).mean()
 
-    features = ["RedditSentiment","Open", "High", "Volume", "PrevClose", "Return", "MA5", "Volatility5", "RollingSentiment_3d", "RollingSentiment_7d", "RollingSentiment_14d", "RollingSentiment_30d", "RollingSentiment_1yr", "InterestRate"]
+    features = ["Open", "High", "Volume", "PrevClose", "Return", "MA5", "Volatility5", "RollingSentiment_14d", "RollingSentiment_30d", "RollingSentiment_1yr", "InterestRate"]
 
     X = stockData[features]
 
@@ -244,16 +256,11 @@ def prepareClassificationData():
 
     X_train, y_train = train[features], train[target]
     X_val, y_val = test[features], test[target]
-    #Create Imputed Data
-    Imputer = SimpleImputer()
-    Imputed_X_Train = pd.DataFrame(Imputer.fit_transform(X_train))
-    Imputed_X_val = pd.DataFrame(Imputer.transform(X_val))
+   
 
-    #Re-add Columns
 
-    Imputed_X_Train.columns = X_train.columns
-    Imputed_X_val.columns = X_val.columns
-    scoreDataset(X_train=Imputed_X_Train, X_val=Imputed_X_val, y_train=y_train, y_val=y_val, nEstimators=300, max_depth=30, min_samples_leaf=4,min_samples_split=2, task="classification", stockData=stockData, features=features)
+
+    scoreDataset(X_train=X_train, X_val=X_val, y_train=y_train, y_val=y_val, nEstimators=300, max_depth=30, min_samples_leaf=4,min_samples_split=2, task="classification", stockData=stockData, features=features)
 
 
 def main():
