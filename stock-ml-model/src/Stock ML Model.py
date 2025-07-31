@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-import sklearn
+from scipy.stats import randint
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import mean_absolute_error
@@ -12,9 +12,13 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from dotenv import load_dotenv
 from pathlib import Path
 from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import RandomizedSearchCV
 import time
-import requests
 from sklearn.pipeline import Pipeline
+from xgboost import XGBRegressor
+from xgboost import XGBClassifier
+import wbdata
+
 
 CACHE_FILE = "reddit_posts_cache.csv"
 
@@ -56,57 +60,81 @@ def fetchRedditPosts(subreddit, keyword, timeframe, sortvalue):
 
 
 def findCorrelation(stockData, features, cor_target):
-    print(stockData[features + ["Target"]].index)
-    print(stockData["Target"].index)
-    print(stockData[features + ["Target"]].head(10))
+    
     for col in features:
-        if stockData[col].equals(stockData["Target"]):
-            print(f"WARNING: Feature {col} is identical to Target!")
-    subset = stockData[features + ["Target"]].dropna()
+            if stockData[col].equals(stockData[cor_target]):
+                print(f"WARNING: Feature {col} is identical to Target!")
+    subset = stockData[features + [cor_target]].dropna()
     for i in features:
         correlation = subset[i].corr(stockData[cor_target])
         print(f"Correlation between {i} and stock price: {correlation:.2f}")
 
-def scoreDataset(X_train, X_val, y_train, y_val, nEstimators, max_depth, min_samples_leaf, min_samples_split, task, stockData, features):
+def scoreDataset(X_train, X_val, y_train, y_val, task, stockData, features):
     if task == "regression":
-        pipeline = Pipeline(steps=[
-        ('imputer', SimpleImputer()),
-        ('model', RandomForestRegressor(
+    
+        XGBmodel = XGBRegressor(
             random_state=1,
-            max_depth=max_depth,
-            n_estimators=nEstimators,
-            min_samples_leaf=min_samples_leaf,
-            min_samples_split=min_samples_split,
-            max_features='sqrt'
-        ))
-    ])
-        pipeline.fit(X_train,y_train)
-        stockPredictions = pipeline.predict(X_val)
+            max_depth=5,
+            n_estimators=100,
+            colsample_bytree=0.7,
+            learning_rate=0.1
+)
+
+        print("Training XGBoost Model...")
+        XGBmodel.fit(X_train, y_train)
+        stockPredictions = XGBmodel.predict(X_val)
         stockMae = mean_absolute_error(y_val, stockPredictions)
         maeAverage = 100 * (stockMae/y_val.mean())
-        print("Validation MAE for Random Forest Model: {:,.2f}".format(maeAverage), "%")
+        print("Validation MAE for XGBoost Model: {:,.2f}".format(maeAverage), "%")
         latest_data = stockData.iloc[-1]
         tomorrow_features = pd.DataFrame([latest_data[features]])
 
         # Predict tomorrow's closing price
-        tomorrow_pred = pipeline.predict(tomorrow_features)
+        tomorrow_pred = XGBmodel.predict(tomorrow_features)
         print(f"Predicted closing price for tomorrow: ${tomorrow_pred[0]:.2f}")
-        findFeatureImportance(pipeline.named_steps["model"], features)
+        findFeatureImportance(XGBmodel, features)
         findCorrelation(stockData, features, "Target")
+
     elif task == "classification":
-        pipeline = Pipeline(steps=[
-        ('imputer', SimpleImputer()),
-        ('model', RandomForestClassifier(
-            random_state=1,
-            max_depth=max_depth,
-            n_estimators=nEstimators,
-            min_samples_leaf=min_samples_leaf,
-            min_samples_split=min_samples_split,
-            max_features='sqrt'
-        ))
-    ])
-        pipeline.fit(X_train,y_train)
-        stockPredictions = pipeline.predict(X_val)
+# Random Search for hyperparameter tuning
+        XGBmodel =  XGBClassifier(
+            subsample=0.7,
+            reg_lambda=1,
+            reg_alpha=0.1,
+            n_estimators=400,
+            min_child_weight=7,
+            max_depth=4,
+            learning_rate=0.2,
+            gamma=0,
+            colsample_bytree=0.6,
+            eval_metric="logloss",
+            random_state=1
+        )
+#         param_dist = {
+#             'n_estimators': [100, 200, 300, 400],
+#             'learning_rate': [0.01, 0.05, 0.1, 0.2],
+#             'max_depth': [3, 4, 5, 6, 8],
+#             'subsample': [0.6, 0.7, 0.8, 1.0],
+#             'colsample_bytree': [0.6, 0.7, 0.8, 1.0],
+#             'gamma': [0, 1, 5],
+#             'min_child_weight': [1, 3, 5, 7],
+#             'reg_alpha': [0, 0.1, 1],
+#             'reg_lambda': [1, 1.5, 2],
+# }
+#         randomSearch = RandomizedSearchCV(
+#             XGBmodel,
+#             param_distributions=param_dist,
+#             n_iter=30,
+#             scoring='accuracy',
+#             cv=3,
+#             verbose=2,
+#             n_jobs=-1)
+#         randomSearch.fit(X_train, y_train)
+#         print("Best parameters found: ", randomSearch.best_params_)
+#         XGBmodel = randomSearch.best_estimator_
+
+        XGBmodel.fit(X_train,y_train)
+        stockPredictions = XGBmodel.predict(X_val)
         from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
         print("Accuracy: {:.2f}".format(accuracy_score(y_val, stockPredictions)))
@@ -116,12 +144,12 @@ def scoreDataset(X_train, X_val, y_train, y_val, nEstimators, max_depth, min_sam
         # Predict wheter the stock price will increase tomorrow
         latest_data = stockData.iloc[-1]
         tomorrow_features = pd.DataFrame([latest_data[features]])
-        tomorrow_pred = pipeline.predict(tomorrow_features)
+        tomorrow_pred = XGBmodel.predict(tomorrow_features)
         if tomorrow_pred[0] == 1:
             print("Predicted stock price will increase tomorrow.")
         else:
             print("Predicted stock price will decrease tomorrow.")
-        findFeatureImportance(pipeline.named_steps["model"], features)
+        findFeatureImportance(XGBmodel, features)
         findCorrelation(stockData, features, "PriceIncrease")
 
 
@@ -170,19 +198,19 @@ def prepareRegressionData():
     stockData = pd.merge(stockData, dailySentiment, on="Date", how="left")
     missingReddit = stockData["RedditSentiment"].isnull().sum()
     print(f"Missing sentiment scores: {missingReddit}")
-    stockData["RedditSentiment"] = stockData["RedditSentiment"].fillna(method="ffill").fillna(method="bfill")
+    stockData["RedditSentiment"] = stockData["RedditSentiment"].ffill().bfill()
     stockData["RedditSentiment"] = stockData["RedditSentiment"].shift(1)  # Shift to align with the next day's price
     stockData['RollingSentiment_3d'] = stockData['RedditSentiment'].rolling(window=3).mean()
 
     #Add Rolling Sentiment Features
     stockData["RollingSentiment_1yr"] = stockData["RedditSentiment"].rolling(window=365).mean()
-
+    stockData.ffill(inplace=True)
     features = ["Open", "High", "PrevClose",  "MA5",  "RollingSentiment_1yr", "InterestRate"]
 
     X = stockData[features]
 
     #split training and test data
-    splitDate = (datetime.now() - timedelta(days=45)).date()
+    splitDate = (datetime.now() - timedelta(days=365)).date()
     train = stockData.loc[stockData["Date"] < pd.Timestamp(splitDate)]
     test = stockData.loc[stockData["Date"] >= pd.Timestamp(splitDate)]
 
@@ -224,6 +252,18 @@ def prepareClassificationData():
     tenYearYieldData = tenYearYieldData[["Date", "Close"]]
     tenYearYieldData.columns = ["Date", "InterestRate"]
 
+    #Get World Bank Data
+    startTime = (datetime.now() - timedelta(days=365*5)).date()
+    endTime = datetime.now().date()
+
+    InflationData = wbdata.get_dataframe(
+        {"FP.CPI.TOTL.ZG": "InflationRate"},
+        country="US",
+        date=(startTime, endTime),
+        convert_date=True
+    ).reset_index()
+    print(f"Inflation data shape: {InflationData.shape}")
+
     #Create PriceDifference Column
     stockData["PriceIncrease"] = (stockData['Close'].shift(-1) > stockData['Close']).astype(int)
 
@@ -241,6 +281,7 @@ def prepareClassificationData():
     stockData["RollingSentiment_14d"] = stockData["RedditSentiment"].rolling(window=14).mean()
     stockData["RollingSentiment_30d"] = stockData["RedditSentiment"].rolling(window=30).mean()
     stockData["RollingSentiment_1yr"] = stockData["RedditSentiment"].rolling(window=365).mean()
+    
 
     features = ["Open", "High", "Volume", "PrevClose", "Return", "MA5", "Volatility5", "RollingSentiment_14d", "RollingSentiment_30d", "RollingSentiment_1yr", "InterestRate"]
 
@@ -259,8 +300,8 @@ def prepareClassificationData():
    
 
 
-
-    scoreDataset(X_train=X_train, X_val=X_val, y_train=y_train, y_val=y_val, nEstimators=300, max_depth=30, min_samples_leaf=4,min_samples_split=2, task="classification", stockData=stockData, features=features)
+    print(y_train.value_counts(normalize=True))
+    scoreDataset(X_train=X_train, X_val=X_val, y_train=y_train, y_val=y_val, task="classification", stockData=stockData, features=features)
 
 
 def main():
@@ -287,10 +328,6 @@ def main():
     try:
         allPosts
         combined_posts = pd.concat(allPosts).drop_duplicates().reset_index(drop=True)
-        print("Combined posts columns:", combined_posts.columns)
-        print("Number of posts:", len(combined_posts))
-        print("Sample data:")
-        print(combined_posts.head())
     except Exception as e:
         x=1
 
@@ -312,8 +349,8 @@ def main():
     
  
     # Choose which preparation function to run:
-    #prepareClassificationData()
-    prepareRegressionData()
+    prepareClassificationData()
+    #prepareRegressionData()
 
 if __name__ == "__main__":
     main()
