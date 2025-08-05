@@ -1,8 +1,6 @@
 import os
 import pandas as pd
 from scipy.stats import randint
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import mean_absolute_error
 from sklearn.impute import SimpleImputer
 import yfinance as yf
@@ -18,9 +16,11 @@ from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
 from xgboost import XGBClassifier
 import wbdata
+from sklearn.preprocessing import OneHotEncoder
 
 
 CACHE_FILE = "reddit_posts_cache.csv"
+#os.remove(CACHE_FILE) 
 
 load_dotenv(dotenv_path="c:/Users/wyatt/Downloads/Progamming projets/stock-ml-model/src/Api.env")
 
@@ -38,7 +38,7 @@ def fetchRedditPosts(subreddit, keyword, timeframe, sortvalue):
         subreddit = reddit.subreddit(subreddit)
         for submission in subreddit.search(query=keyword, sort=sortvalue, time_filter=timeframe, limit=1000):
             created_time = datetime.fromtimestamp(submission.created_utc)
-            if "microsoft" in submission.title.lower() or "msft" in submission.title.lower():
+            if ("microsoft" in submission.title.lower() or "msft" in submission.title.lower()) and created_time.date() >= datetime.now().date() - timedelta(days=365*5):
                 posts.append({
                     "title": submission.title,
                     "Date": created_time
@@ -69,16 +69,52 @@ def findCorrelation(stockData, features, cor_target):
         correlation = subset[i].corr(stockData[cor_target])
         print(f"Correlation between {i} and stock price: {correlation:.2f}")
 
-def scoreDataset(X_train, X_val, y_train, y_val, task, stockData, features):
+def findFeatureImportance(stockModel, features):
+    # After training
+    importances = stockModel.feature_importances_
+    feature_importance = pd.Series(importances, index=features)
+    feature_importance = feature_importance.sort_values(ascending=False)
+    print("Feature Importances:")
+    for feature, importance in feature_importance.items():
+        print(f"{feature}: {importance:.4f}")
+
+def scoreDataset(X_train, X_val, y_train, y_val, task, stockData, features, OHEncoder):
     if task == "regression":
     
         XGBmodel = XGBRegressor(
             random_state=1,
-            max_depth=5,
+            max_depth=8,
+            gamma=5,
             n_estimators=100,
             colsample_bytree=0.7,
-            learning_rate=0.1
+            learning_rate=0.1,
+            subsample=0.6,
+            reg_lambda=2,
+            reg_alpha=1,
+            min_child_weight=5,
 )
+#         param_dist = {
+#              'n_estimators': [100, 200, 300, 400],
+#              'learning_rate': [0.01, 0.05, 0.1, 0.2],
+#              'max_depth': [3, 4, 5, 6, 8],
+#              'subsample': [0.6, 0.7, 0.8, 1.0],
+#              'colsample_bytree': [0.6, 0.7, 0.8, 1.0],
+#             'gamma': [0, 1, 5],
+#              'min_child_weight': [1, 3, 5, 7],
+#              'reg_alpha': [0, 0.1, 1],
+#              'reg_lambda': [1, 1.5, 2],
+#  }
+#         randomSearch = RandomizedSearchCV(
+#              XGBmodel,
+#              param_distributions=param_dist,
+#              n_iter=30,
+#              scoring="neg_mean_absolute_error",
+#              cv=3,
+#              verbose=2,
+#              n_jobs=-1)
+#         randomSearch.fit(X_train, y_train)
+#         print("Best parameters found: ", randomSearch.best_params_)
+#         XGBmodel = randomSearch.best_estimator_
 
         print("Training XGBoost Model...")
         XGBmodel.fit(X_train, y_train)
@@ -87,25 +123,31 @@ def scoreDataset(X_train, X_val, y_train, y_val, task, stockData, features):
         maeAverage = 100 * (stockMae/y_val.mean())
         print("Validation MAE for XGBoost Model: {:,.2f}".format(maeAverage), "%")
         latest_data = stockData.iloc[-1]
-        tomorrow_features = pd.DataFrame([latest_data[features]])
+        object_columns = X_train.select_dtypes(include="object").columns.tolist()
+        features = X_train.columns.tolist() 
+        
+        tomorrow_features = encode_new_row(latest_data, OHEncoder, object_columns, features)
+        tomorrow_features = tomorrow_features.astype(float) 
 
         # Predict tomorrow's closing price
         tomorrow_pred = XGBmodel.predict(tomorrow_features)
         print(f"Predicted closing price for tomorrow: ${tomorrow_pred[0]:.2f}")
         findFeatureImportance(XGBmodel, features)
-        findCorrelation(stockData, features, "Target")
+        df_for_corr = X_train.copy()
+        df_for_corr["Target"] = y_train
+        findCorrelation(df_for_corr, features, "Target")
 
     elif task == "classification":
 # Random Search for hyperparameter tuning
         XGBmodel =  XGBClassifier(
-            subsample=0.7,
+            subsample=0.6,
             reg_lambda=1,
             reg_alpha=0.1,
-            n_estimators=400,
-            min_child_weight=7,
-            max_depth=4,
+            n_estimators=200,
+            min_child_weight=3,
+            max_depth=8,
             learning_rate=0.2,
-            gamma=0,
+            gamma=1,
             colsample_bytree=0.6,
             eval_metric="logloss",
             random_state=1
@@ -141,94 +183,121 @@ def scoreDataset(X_train, X_val, y_train, y_val, task, stockData, features):
         print("F1 Score: {:.2f}".format(f1_score(y_val, stockPredictions)))
         print("Precision: {:.2f}".format(precision_score(y_val, stockPredictions)))
         print("Recall: {:.2f}".format(recall_score(y_val, stockPredictions)))
-        # Predict wheter the stock price will increase tomorrow
+
+        object_columns = stockData.select_dtypes(include="object").columns.tolist()
+        features = X_train.columns.tolist()  
+        encoder = OHEncoder  
+
         latest_data = stockData.iloc[-1]
-        tomorrow_features = pd.DataFrame([latest_data[features]])
+
+        tomorrow_features = encode_new_row(latest_data, encoder, object_columns, features)
+        tomorrow_features = tomorrow_features.astype(float) 
+
+
         tomorrow_pred = XGBmodel.predict(tomorrow_features)
         if tomorrow_pred[0] == 1:
             print("Predicted stock price will increase tomorrow.")
         else:
             print("Predicted stock price will decrease tomorrow.")
         findFeatureImportance(XGBmodel, features)
-        findCorrelation(stockData, features, "PriceIncrease")
+        df_for_corr = X_train.copy()
+        df_for_corr["PriceIncrease"] = y_train
+        findCorrelation(df_for_corr, features, "PriceIncrease")
+
+def encode_new_row(new_row: pd.Series, encoder, object_columns: list, features: list) -> pd.DataFrame:
+    numeric_part = new_row.drop(labels=object_columns)
+    if len(object_columns) == 0 or encoder is None:
+        # No categorical columns to encode, just return numeric part as dataframe with features order
+        df = pd.DataFrame([numeric_part.values], columns=numeric_part.index)
+        df = df.reindex(columns=features, fill_value=0)
+        return df
+
+    object_part = new_row[object_columns].values.reshape(1, -1)
+    encoded_part = encoder.transform(object_part)
+    encoded_df = pd.DataFrame(encoded_part, columns=encoder.get_feature_names_out(object_columns))
+    final_df = pd.concat([pd.DataFrame([numeric_part.values], columns=numeric_part.index), encoded_df], axis=1)
+    final_df = final_df.reindex(columns=features, fill_value=0)
+    return final_df
 
 
-
-
-def findFeatureImportance(stockModel, features):
-    # After training
-    importances = stockModel.feature_importances_
-    # Pair each importance with the feature name
-    feature_importance = pd.Series(importances, index=features)
-    # Sort descending
-    feature_importance = feature_importance.sort_values(ascending=False)
-    # Print
-    print("Feature Importances:")
-    for feature, importance in feature_importance.items():
-        print(f"{feature}: {importance:.4f}")
 
 def prepareRegressionData():
     ticker = yf.Ticker("MSFT")
     tenYearYield = yf.Ticker("^TNX")
-    # Get historical price data (default daily)
-    stockData = ticker.history(period="5y")  # options: '1d', '5d', '1mo', '1y', '5y', 'max'
+    stockData = ticker.history(period="5y")
     stockData["Target"] = stockData["Close"].shift(-1)
     stockData.dropna(inplace=True)
     stockData["PrevClose"] = stockData["Close"].shift(1)
     stockData["Return"] = (stockData["Close"] - stockData["PrevClose"]) / stockData["PrevClose"]
     stockData["MA5"] = stockData["Close"].rolling(5).mean()
-    stockData["Volatility5"] = stockData["Close"].rolling(5).std()
-    # Get 10-year Treasury yield data
+
     tenYearYieldData = tenYearYield.history(period="5y")
     tenYearYieldData = tenYearYieldData.reset_index()
     tenYearYieldData["Date"] = tenYearYieldData["Date"].dt.normalize()
     tenYearYieldData["Date"] = tenYearYieldData["Date"].dt.tz_localize(None)
     tenYearYieldData = tenYearYieldData[["Date", "Close"]]
     tenYearYieldData.columns = ["Date", "InterestRate"]
-    #Create PriceDifference Column
+
     stockData["PriceIncrease"] = (stockData['Close'].shift(-1) > stockData['Close']).astype(int)
 
-    #Merge with Reddit sentiment
-    stockData = stockData.reset_index()  # Make 'Date' a column
+    stockData = stockData.reset_index()
     stockData["Date"] = stockData["Date"].dt.normalize()
-    stockData["Date"] = stockData["Date"].dt.tz_localize(None) 
+    stockData["Date"] = stockData["Date"].dt.tz_localize(None)
 
-    stockData = pd.merge(stockData, tenYearYieldData, on="Date", how="left") 
-
+    stockData = pd.merge(stockData, tenYearYieldData, on="Date", how="left")
     stockData = pd.merge(stockData, dailySentiment, on="Date", how="left")
-    missingReddit = stockData["RedditSentiment"].isnull().sum()
-    print(f"Missing sentiment scores: {missingReddit}")
     stockData["RedditSentiment"] = stockData["RedditSentiment"].ffill().bfill()
-    stockData["RedditSentiment"] = stockData["RedditSentiment"].shift(1)  # Shift to align with the next day's price
+    stockData["RedditSentiment"] = stockData["RedditSentiment"].shift(1)
     stockData['RollingSentiment_3d'] = stockData['RedditSentiment'].rolling(window=3).mean()
 
-    #Add Rolling Sentiment Features
+
     stockData["RollingSentiment_1yr"] = stockData["RedditSentiment"].rolling(window=365).mean()
     stockData.ffill(inplace=True)
-    features = ["Open", "High", "PrevClose",  "MA5",  "RollingSentiment_1yr", "InterestRate"]
 
+    features = ["Open", "High", "PrevClose", "MA5", "RollingSentiment_1yr", "InterestRate"]
+    
     X = stockData[features]
 
-    #split training and test data
     splitDate = (datetime.now() - timedelta(days=365)).date()
     train = stockData.loc[stockData["Date"] < pd.Timestamp(splitDate)]
     test = stockData.loc[stockData["Date"] >= pd.Timestamp(splitDate)]
 
     target = 'Target'
 
-
     X_train, y_train = train[features], train[target]
     X_val, y_val = test[features], test[target]
-    #Create Imputed Data
-    Imputer = SimpleImputer()
-    Imputed_X_Train = pd.DataFrame(Imputer.fit_transform(X_train))
-    Imputed_X_val = pd.DataFrame(Imputer.transform(X_val))
 
-    #Re-add Columns
+    Imputer = SimpleImputer(strategy="most_frequent")
+    NImputer = SimpleImputer(strategy="mean")
 
-    Imputed_X_Train.columns = X_train.columns
-    Imputed_X_val.columns = X_val.columns
-    scoreDataset(Imputed_X_Train, Imputed_X_val, y_train, y_val, nEstimators=100, max_depth=20, min_samples_leaf=1, min_samples_split=2, task="regression", stockData=stockData, features=features)
+    object_columns = X_train.select_dtypes(include="object").columns.tolist()
+    numeric_columns = X_train.select_dtypes(exclude="object").columns.tolist()
+
+    # Impute numeric columns always
+    NImputed_X_Train = pd.DataFrame(NImputer.fit_transform(X_train[numeric_columns]), columns=numeric_columns, index=X_train.index)
+    NImputed_X_val = pd.DataFrame(NImputer.transform(X_val[numeric_columns]), columns=numeric_columns, index=X_val.index)
+
+    if len(object_columns) == 0:
+        # No categorical columns: skip imputing or encoding categorical
+        X_train_final = NImputed_X_Train
+        X_val_final = NImputed_X_val
+        OHEncoder = None
+    else:
+        # Impute categorical columns only if they exist
+        OImputed_X_Train = pd.DataFrame(Imputer.fit_transform(X_train[object_columns].astype(str)), columns=object_columns, index=X_train.index)
+        OImputed_X_val = pd.DataFrame(Imputer.transform(X_val[object_columns].astype(str)), columns=object_columns, index=X_val.index)
+
+        # One-Hot Encode
+        OHEncoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+        OHtrain = pd.DataFrame(OHEncoder.fit_transform(OImputed_X_Train), columns=OHEncoder.get_feature_names_out(object_columns), index=X_train.index)
+        OHval = pd.DataFrame(OHEncoder.transform(OImputed_X_val), columns=OHEncoder.get_feature_names_out(object_columns), index=X_val.index)
+
+        # Combine numeric and encoded categorical
+        X_train_final = pd.concat([NImputed_X_Train, OHtrain], axis=1)
+        X_val_final = pd.concat([NImputed_X_val, OHval], axis=1)
+
+    features_final = X_train_final.columns.tolist()
+    scoreDataset(X_train=X_train_final, X_val=X_val_final, y_train=y_train, y_val=y_val, task="regression", stockData=stockData, features=features_final, OHEncoder=OHEncoder)
 
 
 
@@ -244,6 +313,14 @@ def prepareClassificationData():
     stockData["MA5"] = stockData["Close"].rolling(5).mean()
     stockData["Volatility5"] = stockData["Close"].rolling(5).std()
 
+    
+  
+    # Create Momentum features
+    stockData["Momentum_3d"] = stockData["Close"].pct_change(periods=3)
+    stockData["Momentum_7d"] = stockData["Close"].pct_change(periods=7) 
+    stockData["Momentum_14d"] = stockData["Close"].pct_change(periods=14)
+    stockData["Momentum_30d"] = stockData["Close"].pct_change(periods=30)
+
     # Get 10-year Treasury yield data
     tenYearYieldData = tenYearYield.history(period="5y")
     tenYearYieldData = tenYearYieldData.reset_index()
@@ -252,17 +329,7 @@ def prepareClassificationData():
     tenYearYieldData = tenYearYieldData[["Date", "Close"]]
     tenYearYieldData.columns = ["Date", "InterestRate"]
 
-    #Get World Bank Data
-    startTime = (datetime.now() - timedelta(days=365*5)).date()
-    endTime = datetime.now().date()
 
-    InflationData = wbdata.get_dataframe(
-        {"FP.CPI.TOTL.ZG": "InflationRate"},
-        country="US",
-        date=(startTime, endTime),
-        convert_date=True
-    ).reset_index()
-    print(f"Inflation data shape: {InflationData.shape}")
 
     #Create PriceDifference Column
     stockData["PriceIncrease"] = (stockData['Close'].shift(-1) > stockData['Close']).astype(int)
@@ -271,6 +338,7 @@ def prepareClassificationData():
     stockData = stockData.reset_index()  
     stockData["Date"] = stockData["Date"].dt.normalize()
     stockData["Date"] = stockData["Date"].dt.tz_localize(None)
+
 
     stockData = pd.merge(stockData, tenYearYieldData, on="Date", how="left") 
 
@@ -281,9 +349,14 @@ def prepareClassificationData():
     stockData["RollingSentiment_14d"] = stockData["RedditSentiment"].rolling(window=14).mean()
     stockData["RollingSentiment_30d"] = stockData["RedditSentiment"].rolling(window=30).mean()
     stockData["RollingSentiment_1yr"] = stockData["RedditSentiment"].rolling(window=365).mean()
+
+    # Create Day of the Week Feature
+    stockData["DayOfWeek"] = stockData["Date"].dt.day_name()
+
+   
     
 
-    features = ["Open", "High", "Volume", "PrevClose", "Return", "MA5", "Volatility5", "RollingSentiment_14d", "RollingSentiment_30d", "RollingSentiment_1yr", "InterestRate"]
+    features = ["Open", "High", "Volume", "PrevClose", "Return", "MA5", "Volatility5", "RollingSentiment_14d", "RollingSentiment_30d", "RollingSentiment_1yr", "InterestRate", "Momentum_3d", "Momentum_7d", "Momentum_14d", "Momentum_30d", "DayOfWeek"]
 
     X = stockData[features]
 
@@ -297,11 +370,44 @@ def prepareClassificationData():
 
     X_train, y_train = train[features], train[target]
     X_val, y_val = test[features], test[target]
-   
 
+    OImputer = SimpleImputer(strategy="most_frequent")
+    NImputer = SimpleImputer(strategy="mean")
+    object_columns = stockData.select_dtypes(include="object").columns
+    numeric_columns = stockData.select_dtypes(exclude="object").columns
 
-    print(y_train.value_counts(normalize=True))
-    scoreDataset(X_train=X_train, X_val=X_val, y_train=y_train, y_val=y_val, task="classification", stockData=stockData, features=features)
+    NImputed_X_Train = pd.DataFrame(NImputer.fit_transform(X_train[numeric_columns]))
+    OImputed_X_Train = pd.DataFrame(OImputer.fit_transform(X_train[object_columns].astype(str)))
+    NImputed_X_val = pd.DataFrame(NImputer.transform(X_val[numeric_columns]))
+    OImputed_X_val = pd.DataFrame(OImputer.transform(X_val[object_columns].astype(str)))
+
+    Imputed_X_Train = pd.concat([OImputed_X_Train, NImputed_X_Train], axis=1)
+    Imputed_X_val = pd.concat([OImputed_X_val, NImputed_X_val], axis=1)
+
+    #Re-add Columns
+
+    Imputed_X_Train.columns = X_train.columns
+    Imputed_X_val.columns = X_val.columns
+
+     # Add One-Hot Encoding for Categorical Features
+    
+    print(f"Object columns to be one-hot encoded: {object_columns.tolist()}")
+
+    OHEncoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    OHtrain = pd.DataFrame(OHEncoder.fit_transform(Imputed_X_Train[object_columns]),columns=OHEncoder.get_feature_names_out(object_columns))
+    OHval = pd.DataFrame(OHEncoder.transform(Imputed_X_val[object_columns]), columns=OHEncoder.get_feature_names_out(object_columns))
+
+    OHtrain.index = X_train.index
+    OHval.index = X_val.index
+
+    num_X_train = X_train.drop(object_columns, axis=1)
+    num_X_val = X_val.drop(object_columns, axis=1)
+
+    X_train = pd.concat([num_X_train, OHtrain], axis=1)
+    X_val = pd.concat([num_X_val, OHval], axis=1)  
+    features = X_train.columns.tolist()
+
+    scoreDataset(X_train=X_train, X_val=X_val, y_train=y_train, y_val=y_val, task="classification", stockData=stockData, features=features, OHEncoder=OHEncoder)
 
 
 def main():
@@ -349,8 +455,8 @@ def main():
     
  
     # Choose which preparation function to run:
-    prepareClassificationData()
-    #prepareRegressionData()
+    #prepareClassificationData()
+    prepareRegressionData()
 
 if __name__ == "__main__":
     main()
