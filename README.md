@@ -1,16 +1,15 @@
-27/07/2025
-Added a Classification Model that calculuates whether the Price will Increase or Decrease
-Output:
-  Accuracy: 0.53
-  F1 Score: 0.70
-  Precision: 0.53
-  Recall: 1.00
-  Predicted stock price will increase tomorrow.
-  Return             0.140012
-  Volatility5        0.133731
-  High               0.127558
-  Volume             0.125886
-  MA5                0.122697
-  RedditSentiment    0.119155
-  Open               0.115877
-  PrevClose          0.115085
+#  Stock Price Prediction using Machine Learning
+
+This project builds a machine learning pipeline to predict stock price behavior using historical price data and Reddit sentiment analysis. It supports both **regression** (predicting future prices) and **classification** (predicting price increase/decrease).
+
+##  Features
+
+-  Regression and classification tasks using XGBoost
+-  Sentiment data from Reddit integrated with financial data
+-  Custom feature engineering: momentum, moving averages, volatility, etc.
+-  Rolling sentiment window aggregation (3d, 7d, 14d, 30d, 1yr)
+-  Feature importance & correlation analysis
+-  Imputation and encoding pipelines
+-  Modular Python code structure for scalability
+
+
